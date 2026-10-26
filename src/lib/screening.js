@@ -143,7 +143,13 @@ export function normalizeAnalysis(analysis) {
   const topics = common.key_topics ?? analysis.key_topics;
   const result = {
     decision: normalizeDecision(
-      asText(dims.screening_status ?? dims.screening_result ?? dims.qualification_status ?? dims.qualification),
+      asText(
+        dims.screening_status ??
+          dims.screeningstatus ??
+          dims.screening_result ??
+          dims.qualification_status ??
+          dims.qualification,
+      ),
     ),
     score: toNumber(asText(dims.score_percentage ?? dims.score ?? dims.score_percent)),
     summary: asText(dims.call_summary ?? common.summary ?? analysis.summary),
