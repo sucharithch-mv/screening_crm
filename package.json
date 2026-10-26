@@ -1,0 +1,22 @@
+{
+  "name": "candidate-screening-crm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Candidate screening CRM with AI screening calls via MagickVoice",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "node scripts/test-core.mjs",
+    "simulate:webhook": "node scripts/simulate-webhook.mjs"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "next": "^15.5.7",
+    "react": "^19.1.2",
+    "react-dom": "^19.1.2"
+  }
+}
