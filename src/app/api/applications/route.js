@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import * as db from '../../../lib/db.js';
+import { computeCandidateMatch } from '../../../lib/resume-match.js';
 import { badRequest, json } from '../../../lib/http.js';
 import {
   RESUME_MAX_BYTES,
@@ -32,6 +33,10 @@ export async function POST(request) {
   const experienceRaw = cleanText(form.get('experienceYears'), 10);
   const currentLocation = cleanText(form.get('currentLocation'), 120);
   const linkedinUrl = cleanText(form.get('linkedinUrl'), 300);
+  const noticePeriod = cleanText(form.get('noticePeriod'), 60);
+  const currentCtc = cleanText(form.get('currentCtc'), 60);
+  const expectedCtc = cleanText(form.get('expectedCtc'), 60);
+  const draftToken = cleanText(form.get('draftToken'), 64);
   const consent = ['on', 'true', '1', 'yes'].includes(String(form.get('consent') || '').toLowerCase());
   const file = form.get('resume');
 
@@ -82,6 +87,9 @@ export async function POST(request) {
     experienceYears,
     currentLocation,
     linkedinUrl,
+    noticePeriod,
+    currentCtc,
+    expectedCtc,
     consentToCall: consent,
   });
 
@@ -99,6 +107,10 @@ export async function POST(request) {
     mimeType: RESUME_TYPES[ext].mime,
     uploadedAt: new Date().toISOString(),
   });
+
+  db.deleteDraft(draftToken);
+  // Score the resume against the job in the background; the dashboard picks it up on refresh.
+  computeCandidateMatch(candidate.id).catch((err) => console.warn('[resume-match]', err.message));
 
   return json(
     {

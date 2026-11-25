@@ -13,6 +13,7 @@ export default function JobForm({ defaults }) {
     employmentType: 'Full-time',
     experience: '',
     description: '',
+    skills: '',
   };
   const [form, setForm] = useState(blank);
   const [busy, setBusy] = useState(false);
@@ -104,6 +105,13 @@ export default function JobForm({ defaults }) {
             Description
           </label>
           <textarea id="description" className="textarea" value={form.description} onChange={set('description')} />
+        </div>
+        <div className="field">
+          <label className="label" htmlFor="skills">
+            Key skills
+          </label>
+          <input id="skills" className="input" value={form.skills} onChange={set('skills')} placeholder="Python, SQL, Spark, Airflow, AWS" />
+          <span className="hint">Comma-separated. Used to score resumes against this job before calling. Left blank, skills are read from the description.</span>
         </div>
       </div>
       <div className="card-foot" style={{ textAlign: 'right' }}>

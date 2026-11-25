@@ -22,6 +22,7 @@ export async function PATCH(request, { params }) {
     ['employmentType', 60],
     ['experience', 60],
     ['description', 2000],
+    ['skills', 500],
   ]) {
     if (body[key] !== undefined) patch[key] = cleanText(body[key], max);
   }

@@ -7,6 +7,14 @@ import { formatBytes, formatDateTime, formatDuration, titleCase } from '../../..
 import { DecisionBadge, EmailBadge, StageBadge, ToneBadge } from '../../../../../components/Badges.jsx';
 import CandidateActions from '../../../../../components/CandidateActions.jsx';
 import AutoRefresh from '../../../../../components/AutoRefresh.jsx';
+import CandidateNotes from '../../../../../components/CandidateNotes.jsx';
+import CallStatusPanel from '../../../../../components/CallStatusPanel.jsx';
+import ReviewEmailButton from '../../../../../components/ReviewEmailButton.jsx';
+import ScoreEditor from '../../../../../components/ScoreEditor.jsx';
+import HiringDetails from '../../../../../components/HiringDetails.jsx';
+import RecalcMatchButton from '../../../../../components/RecalcMatchButton.jsx';
+import { MatchBadge } from '../../../../../components/Badges.jsx';
+import { getConfig } from '../../../../../lib/config.js';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +38,12 @@ export default async function CandidatePage({ params }) {
 
   const latest = c.calls.find((k) => k.id === c.latestCallId) || c.calls[0] || null;
   const analysis = latest?.analysis || null;
-  const score = analysis?.score;
+  const cfg = getConfig();
+  const manual = c.manualScore || null;
+  const score = analysis?.score ?? manual?.value ?? null;
+  const hasResult = ['qualified', 'disqualified', 'needs_review'].includes(c.stage);
+  const canReviewEmail = hasResult && c.emailStatus !== 'sent';
+  const match = c.resumeMatch;
   const ringColor = analysis?.decision === 'QUALIFIED' ? 'var(--success)' : analysis?.decision === 'DISQUALIFIED' ? 'var(--danger)' : 'var(--primary)';
   const otherDims = analysis
     ? Object.entries(analysis.dimensions || {}).filter(([k, v]) => !/^q\d+(_result)?$/.test(k) && !SKIP_DIMENSIONS.has(k) && v !== '' && v != null)
@@ -53,8 +66,31 @@ export default async function CandidatePage({ params }) {
             {c.ref} · Applied for <strong>{c.job?.title || '—'}</strong> on {formatDateTime(c.createdAt)}
           </p>
         </div>
-        <CandidateActions candidateId={c.id} hasCall={!!c.latestCallId} isActive={ACTIVE.has(c.stage)} />
+        <CandidateActions candidateId={c.id} hasCall={!!c.latestCallId} isActive={ACTIVE.has(c.stage)} isFailed={c.stage === 'call_failed'} />
       </div>
+
+      <CallStatusPanel
+        candidateId={c.id}
+        stage={c.stage}
+        attempt={c.callAttempt || (c.latestCallId ? 1 : 0)}
+        maxAttempts={cfg.calls.maxAttempts}
+        nextRetryAt={c.nextRetryAt || null}
+        analysingSince={c.stage === 'awaiting_analysis' ? latest?.analysisStartedAt || latest?.updatedAt || null : null}
+        timeoutMinutes={cfg.calls.analysisTimeoutMinutes}
+        autoRetry={cfg.calls.autoRetry}
+      />
+
+      {c.otherApplications?.length > 0 && (
+        <div className="alert tone-info">
+          <strong>Same person, {c.otherApplications.length + 1} applications.</strong> Also applied for:{' '}
+          {c.otherApplications.map((o, i) => (
+            <span key={o.id}>
+              {i > 0 && ', '}
+              <Link href={`/recruiter/candidates/${o.id}`}>{o.jobTitle}</Link> <span className="muted small">({o.ref})</span>
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="detail-grid">
         {/* ── Left column: profile ───────────────────── */}
@@ -85,6 +121,10 @@ export default async function CandidatePage({ params }) {
                     '—'
                   )}
                 </dd>
+                <HiringDetails
+                  candidateId={c.id}
+                  values={{ noticePeriod: c.noticePeriod || '', currentCtc: c.currentCtc || '', expectedCtc: c.expectedCtc || '' }}
+                />
                 <dt>Call consent</dt>
                 <dd>{c.consentToCall ? 'Yes' : 'No'}</dd>
               </dl>
@@ -111,6 +151,52 @@ export default async function CandidatePage({ params }) {
 
           <section className="card">
             <div className="card-head">
+              <h3>Resume match</h3>
+              <RecalcMatchButton candidateId={c.id} label={match ? 'Recalculate' : 'Score now'} />
+            </div>
+            <div className="card-body stack-sm small">
+              {!match ? (
+                <p className="muted">Not scored yet — the resume is compared with the job automatically within a minute of applying.</p>
+              ) : (
+                <>
+                  <MatchBadge match={match} showHint />
+                  {match.reasons?.map((r, i) => (
+                    <div key={i} className="muted">
+                      • {r}
+                    </div>
+                  ))}
+                  {match.matched?.length > 0 && (
+                    <div>
+                      <div className="label mt-8">Has</div>
+                      <div className="skill-list mt-4">
+                        {match.matched.map((s) => (
+                          <span key={s} className="badge plain tone-success">
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {match.missing?.length > 0 && (
+                    <div>
+                      <div className="label mt-8">Not found in resume</div>
+                      <div className="skill-list mt-4">
+                        {match.missing.map((s) => (
+                          <span key={s} className="badge plain tone-danger">
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <p className="muted mt-8">A suggestion only — you can still call any candidate.</p>
+                </>
+              )}
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-head">
               <h3>Result email</h3>
               <EmailBadge status={c.emailStatus} />
             </div>
@@ -124,7 +210,16 @@ export default async function CandidatePage({ params }) {
               <p className="muted mt-8">
                 To: <span className="mono">{analysis?.confirmedEmail || c.email}</span>
               </p>
+              {c.emailStatus === 'pending' && (
+                <p className="mt-8">The result came in without confirmation that MagickVoice emailed the candidate. Review the email and send it.</p>
+              )}
             </div>
+            {canReviewEmail && (
+              <div className="card-foot row-between">
+                <span className="small muted">Preview and edit before it goes out.</span>
+                <ReviewEmailButton candidateId={c.id} candidateName={c.name} />
+              </div>
+            )}
           </section>
 
           <section className="card">
@@ -164,8 +259,16 @@ export default async function CandidatePage({ params }) {
               {analysis && (
                 <>
                   <div className="result-hero">
-                    <div className="score-ring" style={{ '--p': Math.max(0, Math.min(100, score ?? 0)), '--ring-color': ringColor }}>
-                      <span>{score != null ? `${score}%` : '—'}</span>
+                    <div className="stack-sm" style={{ alignItems: 'center' }}>
+                      <div className="score-ring" style={{ '--p': Math.max(0, Math.min(100, score ?? 0)), '--ring-color': ringColor }}>
+                        <span>{score != null ? `${score}%` : '—'}</span>
+                      </div>
+                      {analysis.score == null && manual && (
+                        <span className="small muted" title={manual.reason || undefined}>
+                          Manual · {manual.by?.split('@')[0]}
+                        </span>
+                      )}
+                      {analysis.score == null && <ScoreEditor candidateId={c.id} current={manual} />}
                     </div>
                     <div className="stack-sm" style={{ flex: 1, minWidth: 220 }}>
                       <div className="row wrap">
@@ -216,6 +319,8 @@ export default async function CandidatePage({ params }) {
             </div>
           </section>
 
+          <CandidateNotes candidateId={c.id} notes={c.notes || []} team={cfg.team.map(({ handle, name }) => ({ handle, name }))} />
+
           <section className="card">
             <div className="card-head">
               <h3>Call attempts</h3>
@@ -235,6 +340,10 @@ export default async function CandidatePage({ params }) {
                           <div className="row-between">
                             <div className="row wrap">
                               <StageBadge stage={k.stage} />
+                              <span className="badge plain tone-neutral">
+                                Attempt {k.attempt || 1}
+                                {k.trigger === 'auto' ? ' · auto' : k.trigger === 'retry' ? ' · retry' : ''}
+                              </span>
                               <span className="small muted">status: {k.status || '—'}</span>
                             </div>
                             <span className="small muted">{formatDateTime(k.createdAt)}</span>

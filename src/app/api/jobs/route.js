@@ -45,6 +45,7 @@ export async function POST(request) {
     employmentType: cleanText(body.employmentType, 60),
     experience: cleanText(body.experience, 60),
     description: cleanText(body.description, 2000),
+    skills: cleanText(body.skills, 500),
     isOpen: body.isOpen !== false,
   });
   return json({ job }, 201);

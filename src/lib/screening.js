@@ -18,7 +18,7 @@ export const STAGES = {
 
 export const EMAIL_STATUSES = {
   not_sent: { label: 'Not sent', tone: 'neutral' },
-  pending: { label: 'Awaiting confirmation', tone: 'info' },
+  pending: { label: 'Ready to review', tone: 'info' },
   sent: { label: 'Sent', tone: 'success' },
   failed: { label: 'Failed', tone: 'danger' },
 };

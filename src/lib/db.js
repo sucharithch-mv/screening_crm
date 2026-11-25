@@ -19,6 +19,7 @@ function emptyDb() {
     version: 1,
     seq: { job: 0, candidate: 0 },
     jobs: [],
+    drafts: [],
     candidates: [],
     calls: [],
     webhookEvents: [],
@@ -52,7 +53,7 @@ function load() {
     return db;
   }
   const db = JSON.parse(fs.readFileSync(file, 'utf8'));
-  return { ...emptyDb(), ...db };
+  return { ...emptyDb(), ...db, seq: { ...emptyDb().seq, ...(db.seq || {}) } };
 }
 
 function read(fn) {
@@ -142,6 +143,7 @@ export function createJob(input) {
       employmentType: input.employmentType || 'Full-time',
       experience: input.experience || '',
       description: input.description || '',
+      skills: input.skills || '',
       isOpen: input.isOpen !== false,
       createdAt: now(),
       updatedAt: now(),
@@ -155,7 +157,7 @@ export function updateJob(id, patch) {
   return write((db) => {
     const job = db.jobs.find((j) => j.id === Number(id));
     if (!job) return null;
-    const allowed = ['title', 'companyName', 'agentName', 'location', 'employmentType', 'experience', 'description', 'isOpen'];
+    const allowed = ['title', 'companyName', 'agentName', 'location', 'employmentType', 'experience', 'description', 'skills', 'isOpen'];
     for (const k of allowed) if (patch[k] !== undefined) job[k] = patch[k];
     job.updatedAt = now();
     return clone(job);
@@ -189,7 +191,15 @@ export function createCandidate(input) {
       experienceYears: input.experienceYears ?? null,
       currentLocation: input.currentLocation || '',
       linkedinUrl: input.linkedinUrl || '',
+      noticePeriod: input.noticePeriod || '',
+      currentCtc: input.currentCtc || '',
+      expectedCtc: input.expectedCtc || '',
       resume: input.resume || null,
+      resumeMatch: null,
+      manualScore: null,
+      notes: [],
+      callAttempt: 0,
+      nextRetryAt: null,
       consentToCall: !!input.consentToCall,
       stage: 'applied',
       screening: null,
@@ -235,7 +245,18 @@ export function getCandidate(id) {
     const events = db.webhookEvents
       .filter((e) => e.candidateId === c.id)
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
-    return clone({ ...c, ref: candidateRef(c.id), job, calls, events });
+    const pk = personKey(c);
+    const otherApplications = db.candidates
+      .filter((x) => x.id !== c.id && personKey(x) === pk)
+      .map((x) => ({
+        id: x.id,
+        ref: candidateRef(x.id),
+        jobId: x.jobId,
+        jobTitle: db.jobs.find((j) => j.id === x.jobId)?.title || '—',
+        stage: x.stage,
+        createdAt: x.createdAt,
+      }));
+    return clone({ ...c, notes: c.notes || [], ref: candidateRef(c.id), job, calls, events, otherApplications });
   });
 }
 
@@ -247,8 +268,14 @@ export function listCandidates() {
       .map((c) => {
         const job = jobs.get(c.jobId);
         const call = c.latestCallId ? calls.get(c.latestCallId) : null;
+        const connected = db.calls.some((k) => k.candidateId === c.id && callConnected(k));
         return clone({
           ...c,
+          notes: undefined,
+          notesCount: (c.notes || []).length,
+          personKey: personKey(c),
+          connected,
+          callAttempt: c.callAttempt || (call ? 1 : 0),
           ref: candidateRef(c.id),
           jobTitle: job?.title || '—',
           latestCall: call
@@ -256,7 +283,10 @@ export function listCandidates() {
                 id: call.id,
                 mvCallId: call.mvCallId,
                 status: call.status,
+                stage: call.stage,
                 error: call.error,
+                attempt: call.attempt || 1,
+                analysisStartedAt: call.analysisStartedAt || null,
                 createdAt: call.createdAt,
                 updatedAt: call.updatedAt,
               }
@@ -289,6 +319,9 @@ export function createCall(input) {
       durationSeconds: null,
       emailStatus: 'not_sent',
       emailStatusDetail: null,
+      attempt: input.attempt || 1,
+      trigger: input.trigger || 'manual',
+      analysisStartedAt: null,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -296,6 +329,8 @@ export function createCall(input) {
     const cand = db.candidates.find((c) => c.id === input.candidateId);
     if (cand) {
       cand.latestCallId = call.id;
+      cand.callAttempt = call.attempt;
+      cand.nextRetryAt = null;
       cand.stage = 'call_queued';
       cand.screening = null;
       cand.emailStatus = 'not_sent';
@@ -353,7 +388,11 @@ export function updateCall(id, patch) {
   return write((db) => {
     const call = db.calls.find((k) => k.id === id);
     if (!call) return null;
+    const prevStage = call.stage;
     Object.assign(call, patch, { updatedAt: now() });
+    if (call.stage === 'awaiting_analysis' && prevStage !== 'awaiting_analysis' && !call.analysisStartedAt) {
+      call.analysisStartedAt = now();
+    }
     const cand = db.candidates.find((c) => c.id === call.candidateId);
     if (cand && cand.latestCallId === call.id) {
       cand.stage = call.stage;
@@ -403,4 +442,149 @@ export function markDeliveryProcessed(deliveryId) {
     db.processedDeliveries.push(deliveryId);
     if (db.processedDeliveries.length > 5000) db.processedDeliveries.splice(0, 1000);
   });
+}
+
+/* ─────────────────── Candidate helpers ─────────────────── */
+
+/** Same person = same email AND same phone (last 10 digits). */
+export function personKey(c) {
+  const digits = String(c.phone || '').replace(/\D/g, '').slice(-10);
+  return `${String(c.email || '').trim().toLowerCase()}|${digits}`;
+}
+
+/** A call "connected" when somebody picked up: it has talk time, an analysis, or reached a post-call stage. */
+export function callConnected(k) {
+  if (!k) return false;
+  if (Number(k.talkTimeSeconds) > 0) return true;
+  if (k.analysis) return true;
+  return ['call_in_progress', 'awaiting_analysis', 'qualified', 'disqualified', 'needs_review'].includes(k.stage);
+}
+
+/** Applies a patch object (or a mutator function) to one candidate. */
+export function updateCandidate(id, patch) {
+  return write((db) => {
+    const c = db.candidates.find((x) => x.id === Number(id));
+    if (!c) return null;
+    if (typeof patch === 'function') patch(c);
+    else Object.assign(c, patch);
+    c.updatedAt = now();
+    return clone(c);
+  });
+}
+
+/** Candidates whose automatic retry is due. */
+export function listDueRetries(at = new Date()) {
+  const t = at.toISOString();
+  return read((db) =>
+    clone(db.candidates.filter((c) => c.nextRetryAt && c.nextRetryAt <= t && c.stage === 'call_failed')),
+  );
+}
+
+/** Candidates with a resume whose match score is missing or out of date for their job. */
+export function listCandidatesNeedingMatch() {
+  return read((db) =>
+    clone(
+      db.candidates.filter((c) => {
+        if (!c.resume) return false;
+        const job = db.jobs.find((j) => j.id === c.jobId);
+        if (!job) return false;
+        return !c.resumeMatch || c.resumeMatch.jobUpdatedAt !== job.updatedAt;
+      }),
+    ),
+  );
+}
+
+/* ───────────────────────── Notes ───────────────────────── */
+
+export function addNote(candidateId, { author, authorName, text, mentions }) {
+  return write((db) => {
+    const c = db.candidates.find((x) => x.id === Number(candidateId));
+    if (!c) return null;
+    c.notes = c.notes || [];
+    const note = { id: crypto.randomUUID(), author, authorName, text, mentions: mentions || [], createdAt: now() };
+    c.notes.push(note);
+    c.updatedAt = now();
+    return clone(note);
+  });
+}
+
+export function deleteNote(candidateId, noteId) {
+  return write((db) => {
+    const c = db.candidates.find((x) => x.id === Number(candidateId));
+    if (!c?.notes) return false;
+    const before = c.notes.length;
+    c.notes = c.notes.filter((n) => n.id !== noteId);
+    return c.notes.length !== before;
+  });
+}
+
+/** Every note that @mentions someone, newest first. */
+export function listMentions() {
+  return read((db) => {
+    const out = [];
+    for (const c of db.candidates) {
+      for (const n of c.notes || []) {
+        if (!n.mentions?.length) continue;
+        out.push({
+          ...n,
+          candidateId: c.id,
+          candidateName: c.name,
+          candidateRef: candidateRef(c.id),
+          jobTitle: db.jobs.find((j) => j.id === c.jobId)?.title || '—',
+          stage: c.stage,
+        });
+      }
+    }
+    return clone(out.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+  });
+}
+
+/* ───────────────── Application drafts ("finish later") ───────────────── */
+
+const DRAFT_TTL_DAYS = 30;
+
+export function saveDraft({ token, data }) {
+  return write((db) => {
+    const cutoff = new Date(Date.now() - DRAFT_TTL_DAYS * 86400000).toISOString();
+    db.drafts = (db.drafts || []).filter((d) => d.updatedAt >= cutoff);
+    let draft = token ? db.drafts.find((d) => d.token === token) : null;
+    if (!draft) {
+      draft = { token: crypto.randomBytes(16).toString('hex'), createdAt: now() };
+      db.drafts.push(draft);
+    }
+    draft.data = data;
+    draft.updatedAt = now();
+    return clone(draft);
+  });
+}
+
+export function getDraft(token) {
+  if (!token) return null;
+  return read((db) => clone((db.drafts || []).find((d) => d.token === token)) || null);
+}
+
+export function deleteDraft(token) {
+  if (!token) return;
+  write((db) => {
+    db.drafts = (db.drafts || []).filter((d) => d.token !== token);
+  });
+}
+
+export function listDrafts() {
+  return read((db) =>
+    clone(
+      (db.drafts || [])
+        .map((d) => ({
+          token: d.token,
+          name: d.data?.name || '',
+          email: d.data?.email || '',
+          phone: d.data?.phone || '',
+          jobId: Number(d.data?.jobId) || null,
+          jobTitle: db.jobs.find((j) => j.id === Number(d.data?.jobId))?.title || '—',
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        }))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    ),
+  );
 }

@@ -4,8 +4,9 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 
 const LINKS = [
-  { href: '/recruiter', label: 'Candidates', match: (p) => p === '/recruiter' || p.startsWith('/recruiter/candidates') },
+  { href: '/recruiter', label: 'Candidates', match: (p) => p === '/recruiter' || p.startsWith('/recruiter/candidates') || p.startsWith('/recruiter/compare') },
   { href: '/recruiter/jobs', label: 'Jobs', match: (p) => p.startsWith('/recruiter/jobs') },
+  { href: '/recruiter/mentions', label: 'Mentions', match: (p) => p.startsWith('/recruiter/mentions') },
   { href: '/recruiter/integration', label: 'MagickVoice', match: (p) => p.startsWith('/recruiter/integration') },
 ];
 

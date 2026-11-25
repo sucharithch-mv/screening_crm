@@ -57,7 +57,8 @@ Body sent for each selected candidate:
     "caller_id": "+919429391386",
     "prompt_variables": {
       "agent_name": "Priya", "company_name": "Bilvantis Technologies", "candidate_name": "Asha Rao",
-      "job_role": "Data Engineer", "job_id": "1", "candidate_email": "asha@example.com"
+      "job_role": "Data Engineer", "job_id": "1", "candidate_email": "asha@example.com",
+      "resume_keywords": "SQL, Spark, Airflow, Python, Docker", "missing_skills": "AWS", "experience_years": "4"
     },
     "enable_recording": true, "machine_detection": false, "hangup_on_machine": false
   },
@@ -67,6 +68,14 @@ Body sent for each selected candidate:
 ```
 
 `webhook_url` is only sent when `PUBLIC_BASE_URL` is a public `https://` URL, and `automation_ids` only when that variable is set. `recipient.metadata` is available inside automations as `{{callee.metadata.*}}`.
+
+**Resume variables.** Before each call the CRM reads the candidate's resume and adds:
+
+- `resume_keywords`: up to 15 skills found in the resume, with the ones the job asks for first.
+- `missing_skills`: job skills not found in the resume (`None` when all are present).
+- `experience_years`: years from the application form, otherwise from the resume text.
+
+Any value that can't be worked out is sent as `Not available`. Reference them in the MagickVoice prompt template as `{{resume_keywords}}`, `{{missing_skills}}` and `{{experience_years}}`; for example, ask the agent to confirm hands-on depth in the listed skills and probe the missing ones.
 
 ### AI quality: Platinum or Custom (set in `.env`)
 
@@ -131,6 +140,27 @@ MagickVoice only delivers webhooks to public `https://` URLs. While developing o
 | Needs review | Analysis came back with another value (e.g. callback requested) |
 | Not connected | No answer, busy, switched off, voicemail, failed… |
 | Trigger failed | MagickVoice rejected the call request (the error is shown) |
+
+## Recruiter features (v2)
+
+| Feature | Where |
+|---|---|
+| **Funnel cards** Applied → Called → Connected → Qualified → Emailed (+ Disqualified, Not connected, Emails to review). Click a card to filter the table. | Dashboard |
+| **Job filter chips**, date filter (today / 7 / 30 days / custom), status and resume-match filters, **pagination** (10–100 per page), sortable columns (name, applied, last call, resume match, score) | Dashboard |
+| **Download CSV**: selected candidates, current view, qualified only, disqualified only, or everything. Follows the job / date / search filters. | Dashboard → Download CSV |
+| **Last call** column, call **attempt count** ("Attempt 2/3"), **Retry call** button, and **automatic retries** for busy / no-answer (`CALL_MAX_ATTEMPTS`, `CALL_RETRY_DELAY_MINUTES`) | Dashboard + candidate page |
+| **"Analysing call" timer**. After `ANALYSIS_TIMEOUT_MINUTES` it says *Analysis taking longer than expected* and offers **Retry**, which re-fetches the result | Dashboard + candidate page |
+| **Same person, several jobs** (same email + phone) collapse into one row ("Applied to 3 jobs" expands them); the candidate page links the other applications | Dashboard |
+| **Add score** when a result has no score (stored as a manual score, labelled "manual") | Dashboard + candidate page |
+| **Review & send**: preview and edit the qualified / disqualified email. Sends through SMTP when `SMTP_HOST` + `SMTP_FROM` are set, otherwise open it in your mail app and **Mark as sent** | "Ready to review" email status |
+| **Resume ↔ job match** before calling: skills found / missing + experience fit, as Strong / Possible / Weak. A suggestion only; you can still call anyone. Add **Key skills** to a job to tune it | Dashboard column, candidate page |
+| **Compare 2–3 candidates** for the same job: score, match, skills, experience, notice period, pay, question results | Select 2–3 → Compare |
+| **Notes with @mentions** (`TEAM_MEMBERS` in `.env`); a **Mentions** page lists them, and with SMTP the mentioned person is emailed | Candidate page, Mentions |
+| Trigger button shows **"Call 2 candidates"** and a tooltip when nothing is selected | Dashboard |
+| **Privacy notice** at `/privacy`, linked from the consent checkbox (`PRIVACY_CONTACT_EMAIL`, `DATA_RETENTION_DAYS`) | Careers page |
+| **Save & finish later**: autosaves in the browser and gives a link to finish on any device (30 days). Unfinished applications are listed at the bottom of the dashboard | Careers page |
+
+A background job (`src/lib/scheduler.js`, started from `src/instrumentation.js`) runs every minute. It places due retries, polls calls that have gone quiet, and scores new resumes.
 
 ## Project layout
 

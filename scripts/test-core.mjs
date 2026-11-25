@@ -101,6 +101,10 @@ const triggerRoute = await route('calls/trigger');
 const syncRoute = await route('calls/sync');
 const webhookRoute = await route('webhooks/magickvoice');
 const testRoute = await route('integration/test');
+const notesRoute = await route('candidates/[id]/notes');
+const emailRoute = await route('candidates/[id]/email');
+const matchRoute = await route('candidates/[id]/match');
+const draftsRoute = await route('drafts');
 
 const BASE = 'http://localhost:3000';
 let passed = 0;
@@ -259,7 +263,12 @@ await test('starts calls via POST /proxy/calls with the right headers and variab
     job_role: 'Data Engineer',
     job_id: '1',
     candidate_email: 'asha@example.com',
+    // The fixture PDF has no readable text, so keywords fall back; experience comes from the form.
+    resume_keywords: 'Not available',
+    missing_skills: 'SQL, Spark, Airflow, ETL / ELT, Data modelling, Streaming, AWS, Azure',
+    experience_years: '3',
   });
+  assert.equal(b.recipient.metadata.resume_keywords, 'Not available');
   assert.equal(b.recipient.metadata.application_id, '1');
   assert.equal(b.recipient.metadata.candidate_email, 'asha@example.com');
   assert.deepEqual(b.automation_ids, ['auto_1']);
@@ -506,6 +515,166 @@ await test('bad API key surfaces a clear error', async () => {
   assert.equal(body.ok, false);
   assert.match(body.error, /Invalid API key \(HTTP 401\)/);
   process.env.MAGICKVOICE_API_KEY = 'mgkp_test_key';
+});
+
+console.log('\nCall attempts + automatic retries');
+const dbm = await import(path.join(root, 'src/lib/db.js'));
+const callsLib = await import(path.join(root, 'src/lib/calls.js'));
+const p = (id) => ({ params: Promise.resolve({ id: String(id) }) });
+const patchReq = (url, body) => new Request(`${BASE}${url}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+let riaId;
+const failLatest = async (id) => {
+  const c = dbm.getCandidate(id);
+  const k = c.calls.find((x) => x.id === c.latestCallId);
+  const res = await webhookRoute.POST(jsonReq('/api/webhooks/magickvoice?token=tok_secret', { event: 'call.failed', call_id: k.mvCallId, status: 'busy' }));
+  assert.equal((await res.json()).stage, 'call_failed');
+  return dbm.getCandidate(id);
+};
+const makeDue = (id) => dbm.updateCandidate(id, { nextRetryAt: new Date(Date.now() - 1000).toISOString() });
+
+await test('busy call schedules an automatic retry ~2h later (attempt 1/3)', async () => {
+  const res = await applicationsRoute.POST(applicationForm({ name: 'Ria Sen', email: 'ria@example.com', phone: '9123456780', noticePeriod: '30 days', expectedCtc: '12 LPA' }));
+  riaId = (await res.json()).candidateId;
+  assert.equal(dbm.getCandidate(riaId).noticePeriod, '30 days');
+  const t = await (await triggerRoute.POST(authed(jsonReq('/api/calls/trigger', { candidateIds: [riaId] })))).json();
+  assert.equal(t.results[0].attempt, 1);
+  const c = await failLatest(riaId);
+  assert.equal(c.callAttempt, 1);
+  const mins = (new Date(c.nextRetryAt) - Date.now()) / 60000;
+  assert.ok(mins > 118 && mins <= 120, `retry in ${mins} min`);
+});
+await test('due retries are placed automatically as attempt 2, then 3; none after 3', async () => {
+  makeDue(riaId);
+  let r = await callsLib.processDueRetries();
+  assert.equal(r.length, 1);
+  assert.equal(r[0].attempt, 2);
+  let c = dbm.getCandidate(riaId);
+  assert.equal(c.stage, 'call_queued');
+  assert.equal(c.calls[0].trigger, 'auto');
+  assert.equal(c.nextRetryAt, null);
+  c = await failLatest(riaId);
+  assert.ok(c.nextRetryAt);
+  makeDue(riaId);
+  r = await callsLib.processDueRetries();
+  assert.equal(r[0].attempt, 3);
+  c = await failLatest(riaId);
+  assert.equal(c.callAttempt, 3);
+  assert.equal(c.nextRetryAt, null, 'no retry after the last attempt');
+  assert.equal((await callsLib.processDueRetries()).length, 0);
+});
+await test('"Retry call" continues the series; a fresh call after a result starts at 1', async () => {
+  const t = await (await triggerRoute.POST(authed(jsonReq('/api/calls/trigger', { candidateIds: [riaId], trigger: 'retry' })))).json();
+  assert.equal(t.results[0].attempt, 4);
+  const asha = await (await triggerRoute.POST(authed(jsonReq('/api/calls/trigger', { candidateIds: [2], force: true })))).json();
+  assert.equal(asha.results[0].attempt, 1);
+});
+await test('auto-retry can be cancelled', async () => {
+  const c = await failLatest(riaId);
+  dbm.updateCandidate(riaId, { nextRetryAt: new Date(Date.now() + 60000).toISOString() });
+  const res = await candidateRoute.PATCH(authed(patchReq(`/api/candidates/${riaId}`, { cancelAutoRetry: true })), p(riaId));
+  assert.equal(res.status, 200);
+  assert.equal(dbm.getCandidate(c.id).nextRetryAt, null);
+});
+await test('"Analysing call" records when analysis started', async () => {
+  const c = dbm.getCandidate(2);
+  dbm.updateCall(c.latestCallId, { stage: 'awaiting_analysis' });
+  const row = dbm.listCandidates().find((x) => x.id === 2);
+  assert.equal(row.stage, 'awaiting_analysis');
+  assert.ok(row.latestCall.analysisStartedAt);
+});
+
+console.log('\nRecruiter tools');
+await test('recruiter can add a manual score (0–100) when the analysis has none', async () => {
+  const bad = await candidateRoute.PATCH(authed(patchReq('/api/candidates/1', { manualScore: 150 })), p(1));
+  assert.equal(bad.status, 400);
+  const res = await candidateRoute.PATCH(authed(patchReq('/api/candidates/1', { manualScore: 72, reason: 'Strong SQL' })), p(1));
+  const { candidate } = await res.json();
+  assert.equal(candidate.manualScore.value, 72);
+  assert.equal(candidate.manualScore.by, 'recruiter@example.com');
+});
+await test('notes keep @mentions of known teammates only', async () => {
+  process.env.TEAM_MEMBERS = 'geetanand|Geetanand M|, hr|HR Lead|';
+  const res = await notesRoute.POST(authed(jsonReq('/api/candidates/1/notes', { text: '@geetanand worth a look. cc @nobody and @hr.' })), p(1));
+  assert.equal(res.status, 201);
+  const { note } = await res.json();
+  assert.deepEqual(note.mentions.sort(), ['geetanand', 'hr']);
+  assert.equal(dbm.listMentions()[0].candidateId, 1);
+  assert.equal(dbm.listCandidates().find((x) => x.id === 1).notesCount, 1);
+  const del = await notesRoute.DELETE(authed(new Request(`${BASE}/api/candidates/1/notes?noteId=${note.id}`, { method: 'DELETE' })), p(1));
+  assert.equal(del.status, 200);
+  delete process.env.TEAM_MEMBERS;
+});
+await test('review & send: preview uses the decision template; mark as sent', async () => {
+  dbm.updateCall(dbm.getCandidate(2).latestCallId, {
+    stage: 'qualified',
+    analysis: { decision: 'QUALIFIED', score: 80, summary: 'Good', questions: [], dimensions: {} },
+    emailStatus: 'pending',
+  });
+  const qualified = dbm.listCandidates().find((x) => x.id === 2);
+  assert.equal(qualified.emailStatus, 'pending');
+  const pv = await (await emailRoute.GET(authed(new Request(`${BASE}/api/candidates/${qualified.id}/email`)), p(qualified.id))).json();
+  assert.ok(pv.email.subject.includes(qualified.jobTitle));
+  assert.equal(pv.email.decision, 'QUALIFIED');
+  assert.match(pv.email.body, /cleared the initial screening/);
+  assert.equal(pv.canSend, false);
+  const noSmtp = await emailRoute.POST(authed(jsonReq(`/api/candidates/${qualified.id}/email`, { action: 'send', ...pv.email })), p(qualified.id));
+  assert.equal(noSmtp.status, 400);
+  const res = await emailRoute.POST(authed(jsonReq(`/api/candidates/${qualified.id}/email`, { action: 'mark_sent' })), p(qualified.id));
+  assert.equal(res.status, 200);
+  assert.equal(dbm.getCandidate(qualified.id).emailStatus, 'sent');
+});
+await test('same email + phone across jobs is one person', async () => {
+  const res = await applicationsRoute.POST(applicationForm({ jobId: '2', name: 'Ria Sen', email: 'ria@example.com', phone: '+91 91234 56780' }));
+  const id = (await res.json()).candidateId;
+  const rows = dbm.listCandidates();
+  assert.equal(rows.find((x) => x.id === id).personKey, rows.find((x) => x.id === riaId).personKey);
+  assert.equal(dbm.getCandidate(id).otherApplications[0].id, riaId);
+});
+
+console.log('\nResume match + drafts');
+const rm = await import(path.join(root, 'src/lib/resume-match.js'));
+await test('resume match scores skills + experience against the job', async () => {
+  const job = { title: 'Data Engineer', experience: '2–5 years', description: 'SQL, Spark, Airflow on AWS. Data modelling.' };
+  const good = rm.scoreMatch({ job, resumeText: '4 years of experience building Spark and Airflow pipelines in SQL on AWS; dimensional modelling.', experienceYears: null });
+  const bad = rm.scoreMatch({ job, resumeText: 'Graphic designer. Figma, Photoshop.', experienceYears: 1 });
+  assert.equal(good.level, 'strong');
+  assert.equal(good.experienceYears, 4);
+  assert.equal(bad.level, 'weak');
+  assert.ok(bad.missing.includes('Spark'));
+});
+await test('resume keywords become prompt variables (job skills first)', async () => {
+  const storedName = 'kw-test.pdf';
+  const file = path.join(dataDir, 'resumes', storedName);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'x');
+  fs.writeFileSync(`${file}.txt`, '5 years of experience. Python, Docker, Kubernetes. Built Airflow and Spark pipelines in SQL.');
+  const vars = await rm.resumePromptVariables({
+    resume: { storedName, mimeType: 'application/pdf' },
+    experienceYears: null,
+    job: { title: 'Data Engineer', experience: '2–5 years', description: 'SQL, Spark, Airflow on AWS.' },
+  });
+  assert.equal(vars.resume_keywords.split(', ').slice(0, 3).join(', '), 'SQL, Spark, Airflow');
+  assert.ok(vars.resume_keywords.includes('Python') && vars.resume_keywords.includes('Kubernetes'));
+  assert.ok(vars.missing_skills.includes('AWS'));
+  assert.equal(vars.experience_years, '5');
+});
+await test('unreadable resume → "unknown" match, stored on the candidate', async () => {
+  const res = await matchRoute.POST(authed(new Request(`${BASE}/api/candidates/1/match`, { method: 'POST' })), p(1));
+  const { match } = await res.json();
+  assert.equal(match.level, 'unknown');
+  assert.equal(dbm.getCandidate(1).resumeMatch.level, 'unknown');
+});
+await test('save & finish later: draft saved, loaded, and cleared on submit', async () => {
+  const save = await draftsRoute.POST(jsonReq('/api/drafts', { data: { name: 'Dev Patel', email: 'dev@example.com', jobId: '1' } }));
+  const { token } = await save.json();
+  assert.match(token, /^[a-f0-9]{32}$/);
+  const load = await (await draftsRoute.GET(new Request(`${BASE}/api/drafts?token=${token}`))).json();
+  assert.equal(load.data.email, 'dev@example.com');
+  assert.equal(dbm.listDrafts().length, 1);
+  const res = await applicationsRoute.POST(applicationForm({ name: 'Dev Patel', email: 'dev@example.com', phone: '9000012345', draftToken: token }));
+  assert.equal(res.status, 201);
+  assert.equal(dbm.listDrafts().length, 0);
+  assert.equal((await draftsRoute.GET(new Request(`${BASE}/api/drafts?token=${token}`))).status, 404);
 });
 
 mock.close();

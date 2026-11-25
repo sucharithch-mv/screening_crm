@@ -21,3 +21,28 @@ export function DecisionBadge({ decision }) {
 export function ToneBadge({ tone = 'neutral', children }) {
   return <span className={`badge plain tone-${tone}`}>{children}</span>;
 }
+
+const MATCH = {
+  strong: { label: 'Strong', tone: 'success', hint: 'Worth calling' },
+  possible: { label: 'Possible', tone: 'warning', hint: 'Partial fit' },
+  weak: { label: 'Weak', tone: 'danger', hint: 'Likely mismatch — skipping saves call minutes' },
+  unknown: { label: 'Unread', tone: 'neutral', hint: 'Resume could not be read' },
+};
+
+/** Resume ↔ job match, e.g. "68% · Strong". */
+export function MatchBadge({ match, showHint = false }) {
+  if (!match) return <span className="muted small">Scoring…</span>;
+  const m = MATCH[match.level] || MATCH.unknown;
+  const title = [m.hint, ...(match.reasons || []), match.missing?.length ? `Missing: ${match.missing.join(', ')}` : '']
+    .filter(Boolean)
+    .join('\n');
+  return (
+    <span className="stack-sm" style={{ gap: 2, alignItems: "flex-start" }} title={title}>
+      <span className={`badge plain tone-${m.tone}`}>
+        {match.score != null ? `${match.score}% · ` : ''}
+        {m.label}
+      </span>
+      {showHint && <span className="cell-sub">{m.hint}</span>}
+    </span>
+  );
+}

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getConfig } from './config.js';
+import { getConfig, missingMagickVoiceSettings } from './config.js';
 import * as db from './db.js';
 import {
   buildCallPayload,
@@ -9,6 +9,7 @@ import {
   fetchCall,
   redactPayload,
 } from './magickvoice.js';
+import { resumePromptVariables } from './resume-match.js';
 import { ACTIVE_STAGES, nextEmailStatus, nextStage, parseMagickVoicePayload } from './screening.js';
 
 const MAX_PER_BATCH = 50;
@@ -21,7 +22,7 @@ function newExternalRef(candidateId) {
  * Starts AI screening calls for the given candidates, one MagickVoice call each.
  * Returns a per-candidate result list (never throws for a single failure).
  */
-export async function triggerScreeningCalls(candidateIds, { force = false } = {}) {
+export async function triggerScreeningCalls(candidateIds, { force = false, trigger = 'manual' } = {}) {
   const ids = [...new Set((candidateIds || []).map(Number).filter(Number.isInteger))].slice(0, MAX_PER_BATCH);
   const results = [];
 
@@ -41,7 +42,13 @@ export async function triggerScreeningCalls(candidateIds, { force = false } = {}
     }
 
     const externalRefId = newExternalRef(candidate.id);
-    const variables = buildPromptVariables({ candidate, job: candidate.job });
+    let resume = null;
+    try {
+      resume = await resumePromptVariables(candidate);
+    } catch (err) {
+      console.warn('[calls] could not read resume keywords for candidate', id, err.message);
+    }
+    const variables = buildPromptVariables({ candidate, job: candidate.job, resume });
     let payload;
     try {
       payload = buildCallPayload({ candidate, job: candidate.job, externalRefId, variables });
@@ -50,9 +57,15 @@ export async function triggerScreeningCalls(candidateIds, { force = false } = {}
       continue;
     }
 
+    // A new call after "Not connected" continues the same attempt series (Attempt 2/3, 3/3 …).
+    const continuing = candidate.stage === 'call_failed' || trigger === 'auto' || trigger === 'retry';
+    const attempt = continuing ? (candidate.callAttempt || previousAttempts(candidate)) + 1 : 1;
+
     const call = db.createCall({
       candidateId: candidate.id,
       jobId: candidate.job.id,
+      attempt,
+      trigger,
       externalRefId,
       variables,
       request: redactPayload(payload),
@@ -68,7 +81,7 @@ export async function triggerScreeningCalls(candidateIds, { force = false } = {}
         status: parsed.rawStatus || 'queued',
         stage: nextStage('call_queued', parsed),
       });
-      results.push({ candidateId: id, ok: true, callId: call.id, mvCallId });
+      results.push({ candidateId: id, ok: true, callId: call.id, mvCallId, attempt });
     } catch (err) {
       db.updateCall(call.id, {
         status: 'trigger_failed',
@@ -110,7 +123,56 @@ export function applyMagickVoiceUpdate(call, parsed) {
     patch.emailStatus = email.status;
     patch.emailStatusDetail = email.detail;
   }
-  return db.updateCall(call.id, patch);
+  const updated = db.updateCall(call.id, patch);
+  if (updated && stage === 'call_failed' && call.stage !== 'call_failed') scheduleAutoRetry(updated);
+  return updated;
+}
+
+/** Legacy records have no attempt counter: count the run of unconnected calls at the end of the history. */
+function previousAttempts(candidate) {
+  let n = 0;
+  for (const k of candidate.calls || []) {
+    if (k.stage === 'call_failed' || k.stage === 'trigger_failed') n += 1;
+    else break;
+  }
+  return Math.max(n, 1);
+}
+
+/**
+ * Busy / no answer / switched off … → schedule another attempt after the configured delay,
+ * until CALL_MAX_ATTEMPTS is reached.
+ */
+export function scheduleAutoRetry(call) {
+  const cfg = getConfig();
+  if (!cfg.calls.autoRetry) return null;
+  const cand = db.getCandidate(call.candidateId);
+  if (!cand || cand.latestCallId !== call.id) return null;
+  const attempt = call.attempt || cand.callAttempt || 1;
+  if (attempt >= cfg.calls.maxAttempts) {
+    db.updateCandidate(cand.id, { nextRetryAt: null });
+    return null;
+  }
+  const at = new Date(Date.now() + cfg.calls.retryDelayMinutes * 60000).toISOString();
+  db.updateCandidate(cand.id, { nextRetryAt: at });
+  return at;
+}
+
+export function cancelAutoRetry(candidateId) {
+  return db.updateCandidate(candidateId, { nextRetryAt: null });
+}
+
+/** Places every automatic retry that is due. Called by the background scheduler. */
+export async function processDueRetries() {
+  const due = db.listDueRetries();
+  if (!due.length || missingMagickVoiceSettings().length) return [];
+  const results = [];
+  for (const c of due) {
+    db.updateCandidate(c.id, { nextRetryAt: null }); // claim it first so it never fires twice
+    const [r] = await triggerScreeningCalls([c.id], { trigger: 'auto' });
+    results.push(r);
+    if (r && !r.ok) console.warn('[auto-retry] candidate', c.id, r.error);
+  }
+  return results;
 }
 
 /** Pulls the latest call detail from MagickVoice (useful when webhooks can't reach you). */

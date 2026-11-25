@@ -59,8 +59,63 @@ export function getConfig() {
       countryCode: env('DEFAULT_COUNTRY_CODE', '+91'),
     },
     dataDir: env('DATA_DIR') || path.join(process.cwd(), 'data'),
+    calls: {
+      // Busy / no-answer calls are retried automatically until this many attempts have been made.
+      maxAttempts: Math.max(1, num('CALL_MAX_ATTEMPTS', 3)),
+      retryDelayMinutes: Math.max(1, num('CALL_RETRY_DELAY_MINUTES', 120)),
+      autoRetry: bool('CALL_AUTO_RETRY', true),
+      // After this long in "Analysing call", the UI says it is taking longer than expected.
+      analysisTimeoutMinutes: Math.max(1, num('ANALYSIS_TIMEOUT_MINUTES', 10)),
+      schedulerSeconds: Math.max(15, num('SCHEDULER_INTERVAL_SECONDS', 60)),
+    },
+    smtp: {
+      host: env('SMTP_HOST'),
+      port: num('SMTP_PORT', 587),
+      secure: bool('SMTP_SECURE', false),
+      user: env('SMTP_USER'),
+      pass: env('SMTP_PASS'),
+      from: env('SMTP_FROM'),
+    },
+    team: parseTeam(env('TEAM_MEMBERS'), env('RECRUITER_EMAIL')),
+    privacy: {
+      contactEmail: env('PRIVACY_CONTACT_EMAIL', env('RECRUITER_EMAIL')),
+      retentionDays: Math.max(1, num('DATA_RETENTION_DAYS', 180)),
+    },
   };
 }
+
+function num(key, fallback) {
+  const n = Number(env(key, String(fallback)));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * TEAM_MEMBERS = "handle|Display name|email, handle2|Name 2|email2"
+ * Used for @mentions in candidate notes. The signed-in recruiter is always included.
+ */
+function parseTeam(raw, recruiterEmail) {
+  const members = [];
+  const seen = new Set();
+  const add = (handle, name, email) => {
+    const h = String(handle || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '');
+    if (!h || seen.has(h)) return;
+    seen.add(h);
+    members.push({ handle: h, name: String(name || h).trim() || h, email: String(email || '').trim() });
+  };
+  for (const part of String(raw || '').split(/[,;\n]/)) {
+    const [handle, name, email] = part.split('|');
+    if (handle && handle.trim()) add(handle, name, email);
+  }
+  if (recruiterEmail && !members.some((m) => m.email.toLowerCase() === recruiterEmail.toLowerCase())) {
+    add(recruiterEmail.split('@')[0], 'Recruiter', recruiterEmail);
+  }
+  return members;
+}
+
+export const smtpConfigured = (cfg = getConfig()) => !!(cfg.smtp.host && cfg.smtp.from);
 
 /** The URL MagickVoice should POST to (includes the shared token). */
 export function webhookUrl(cfg = getConfig()) {

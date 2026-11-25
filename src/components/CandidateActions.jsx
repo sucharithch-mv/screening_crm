@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-export default function CandidateActions({ candidateId, hasCall, isActive }) {
+export default function CandidateActions({ candidateId, hasCall, isActive, isFailed = false }) {
   const router = useRouter();
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
@@ -18,7 +18,7 @@ export default function CandidateActions({ candidateId, hasCall, isActive }) {
       const res = await fetch('/api/calls/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidateIds: [candidateId], force: true }),
+        body: JSON.stringify({ candidateIds: [candidateId], force: true, trigger: isFailed ? 'retry' : 'manual' }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) setNote({ tone: 'danger', text: body.error || 'Could not start the call.' });

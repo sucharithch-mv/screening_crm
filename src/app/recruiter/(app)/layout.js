@@ -9,7 +9,7 @@ export default async function RecruiterLayout({ children }) {
   return (
     <>
       <header className="topbar">
-        <div className="container topbar-inner">
+        <div className="container wide topbar-inner">
           <Link href="/recruiter" className="brand">
             <span className="brand-mark">S</span>
             Screening CRM
@@ -17,7 +17,7 @@ export default async function RecruiterLayout({ children }) {
           <RecruiterNav email={session.email} />
         </div>
       </header>
-      <main className="container page">{children}</main>
+      <main className="container wide page">{children}</main>
     </>
   );
 }

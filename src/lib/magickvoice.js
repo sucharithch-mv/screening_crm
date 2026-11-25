@@ -70,7 +70,7 @@ async function request(method, pathname, body) {
 }
 
 /** Values injected into the "Candidate Pre-Screening Agent" call script. */
-export function buildPromptVariables({ candidate, job }) {
+export function buildPromptVariables({ candidate, job, resume = null }) {
   const cfg = getConfig();
   return {
     agent_name: job.agentName || cfg.defaults.agentName,
@@ -79,6 +79,8 @@ export function buildPromptVariables({ candidate, job }) {
     job_role: job.title,
     job_id: String(job.id),
     candidate_email: candidate.email,
+    // From the resume (see resumePromptVariables): resume_keywords, missing_skills, experience_years
+    ...(resume || {}),
   };
 }
 

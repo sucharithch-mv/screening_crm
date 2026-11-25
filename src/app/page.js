@@ -18,6 +18,7 @@ export default async function CareersPage({ searchParams }) {
     description: j.description,
   }));
   const preselected = Number(params.job) || null;
+  const draftToken = /^[a-f0-9]{32}$/.test(String(params.draft || '')) ? String(params.draft) : null;
 
   return (
     <>
@@ -68,7 +69,7 @@ export default async function CareersPage({ searchParams }) {
       </section>
 
       <main className="container page">
-        <CareersClient jobs={jobs} preselectedJobId={preselected} />
+        <CareersClient jobs={jobs} preselectedJobId={preselected} draftToken={draftToken} />
       </main>
     </>
   );

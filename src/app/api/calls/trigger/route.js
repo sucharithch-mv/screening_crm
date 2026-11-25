@@ -23,7 +23,8 @@ export async function POST(request) {
   const ids = Array.isArray(body?.candidateIds) ? body.candidateIds : [];
   if (!ids.length) return badRequest('Select at least one candidate.');
 
-  const results = await triggerScreeningCalls(ids, { force: !!body.force });
+  const trigger = body.trigger === 'retry' ? 'retry' : 'manual';
+  const results = await triggerScreeningCalls(ids, { force: !!body.force, trigger });
   const started = results.filter((r) => r.ok).length;
   return json({ started, failed: results.length - started, results });
 }

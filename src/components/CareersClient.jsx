@@ -1,11 +1,37 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-const EMPTY = { name: '', email: '', phone: '', experienceYears: '', currentLocation: '', linkedinUrl: '' };
+const EMPTY = {
+  name: '',
+  email: '',
+  phone: '',
+  experienceYears: '',
+  currentLocation: '',
+  linkedinUrl: '',
+  noticePeriod: '',
+  currentCtc: '',
+  expectedCtc: '',
+};
+const LOCAL_KEY = 'careers-application-draft';
+const readLocal = () => {
+  try {
+    return JSON.parse(window.localStorage.getItem(LOCAL_KEY) || 'null');
+  } catch {
+    return null;
+  }
+};
+const writeLocal = (v) => {
+  try {
+    if (v) window.localStorage.setItem(LOCAL_KEY, JSON.stringify(v));
+    else window.localStorage.removeItem(LOCAL_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+};
 const ACCEPT = '.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
-export default function CareersClient({ jobs, preselectedJobId }) {
+export default function CareersClient({ jobs, preselectedJobId, draftToken: initialDraftToken = null }) {
   const initialJob = jobs.some((j) => j.id === preselectedJobId) ? String(preselectedJobId) : '';
   const [jobId, setJobId] = useState(initialJob);
   const [form, setForm] = useState(EMPTY);
@@ -18,6 +44,81 @@ export default function CareersClient({ jobs, preselectedJobId }) {
   const [done, setDone] = useState(null);
   const formRef = useRef(null);
   const fileRef = useRef(null);
+  const [draftToken, setDraftToken] = useState(initialDraftToken);
+  const [saved, setSaved] = useState(null); // { link, savedAt }
+  const [restored, setRestored] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const loadedRef = useRef(false);
+
+  // Restore a saved application: from a "finish later" link (?draft=…) or this browser's autosave.
+  useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+    const apply = (data, source) => {
+      if (!data) return;
+      setForm((f) => ({ ...f, ...Object.fromEntries(Object.keys(EMPTY).map((k) => [k, data[k] ?? f[k] ?? ''])) }));
+      if (data.jobId && jobs.some((j) => String(j.id) === String(data.jobId))) setJobId(String(data.jobId));
+      setRestored(source);
+    };
+    if (initialDraftToken) {
+      fetch(`/api/drafts?token=${initialDraftToken}`)
+        .then((r) => r.json().then((b) => ({ ok: r.ok, b })))
+        .then(({ ok, b }) => {
+          if (ok) apply(b.data, 'link');
+          else {
+            setDraftToken(null);
+            setMessage({ tone: 'warning', text: b.error || 'That saved application could not be found.' });
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+    const local = readLocal();
+    if (local?.data && Object.values(local.data).some((v) => v && String(v).trim())) {
+      apply(local.data, 'browser');
+      if (local.token) setDraftToken(local.token);
+    }
+  }, [initialDraftToken, jobs]);
+
+  // Autosave to this browser while typing (the resume file can't be saved — it must be re-attached).
+  useEffect(() => {
+    if (!loadedRef.current || done) return;
+    const hasAny = jobId || Object.values(form).some((v) => String(v).trim());
+    writeLocal(hasAny ? { data: { ...form, jobId }, token: draftToken, savedAt: new Date().toISOString() } : null);
+  }, [form, jobId, draftToken, done]);
+
+  async function saveForLater() {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/drafts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: draftToken, data: { ...form, jobId } }),
+      });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessage({ tone: 'danger', text: b.error || 'Could not save your progress.' });
+        return;
+      }
+      setDraftToken(b.token);
+      const link = `${window.location.origin}/?draft=${b.token}`;
+      setSaved({ link, savedAt: b.savedAt });
+    } catch {
+      setMessage({ tone: 'danger', text: 'Network error. Your progress is still saved in this browser.' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function startOver() {
+    writeLocal(null);
+    setForm(EMPTY);
+    setJobId(initialJob);
+    setDraftToken(null);
+    setRestored(null);
+    setSaved(null);
+  }
 
   const selectJob = (id) => {
     setJobId(String(id));
@@ -57,6 +158,7 @@ export default function CareersClient({ jobs, preselectedJobId }) {
     for (const [k, v] of Object.entries(form)) data.set(k, v.trim());
     data.set('consent', consent ? 'true' : 'false');
     data.set('resume', file);
+    if (draftToken) data.set('draftToken', draftToken);
 
     setSubmitting(true);
     try {
@@ -68,6 +170,10 @@ export default function CareersClient({ jobs, preselectedJobId }) {
         return;
       }
       setDone(body);
+      writeLocal(null);
+      setDraftToken(null);
+      setSaved(null);
+      setRestored(null);
       setForm(EMPTY);
       setFile(null);
       setConsent(false);
@@ -144,6 +250,32 @@ export default function CareersClient({ jobs, preselectedJobId }) {
             </div>
             <div className="card-body stack">
               {message && <div className={`alert tone-${message.tone}`}>{message.text}</div>}
+              {restored && !saved && (
+                <div className="alert tone-info saved-note">
+                  <span>
+                    Welcome back — we restored the details you saved{restored === 'link' ? '' : ' in this browser'}. Please attach your resume again
+                    to finish.
+                  </span>
+                  <button type="button" className="link-btn small" onClick={startOver}>
+                    Start over
+                  </button>
+                </div>
+              )}
+              {saved && (
+                <div className="alert tone-success stack-sm">
+                  <strong>Progress saved.</strong>
+                  <span className="small">
+                    Bookmark or copy this link to finish your application on any device within 30 days. (Your resume isn&apos;t saved — attach it when you
+                    come back.)
+                  </span>
+                  <div className="copy-field">
+                    <input className="input" readOnly value={saved.link} onFocus={(e) => e.target.select()} aria-label="Finish-later link" />
+                    <button type="button" className="btn" onClick={() => navigator.clipboard?.writeText(saved.link)}>
+                      Copy
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="field">
                 <label className="label" htmlFor="jobId">
@@ -186,6 +318,23 @@ export default function CareersClient({ jobs, preselectedJobId }) {
                 </Field>
                 <Field label="LinkedIn profile" id="linkedinUrl" error={errors.linkedinUrl}>
                   <input id="linkedinUrl" className="input" value={form.linkedinUrl} onChange={update('linkedinUrl')} placeholder="https://linkedin.com/in/…" />
+                </Field>
+                <Field label="Notice period" id="noticePeriod" error={errors.noticePeriod}>
+                  <select id="noticePeriod" className="select" value={form.noticePeriod} onChange={update('noticePeriod')}>
+                    <option value="">Select…</option>
+                    <option>Immediate</option>
+                    <option>15 days</option>
+                    <option>30 days</option>
+                    <option>45 days</option>
+                    <option>60 days</option>
+                    <option>90 days</option>
+                  </select>
+                </Field>
+                <Field label="Current CTC" id="currentCtc" error={errors.currentCtc}>
+                  <input id="currentCtc" className="input" value={form.currentCtc} onChange={update('currentCtc')} placeholder="e.g. 8 LPA" />
+                </Field>
+                <Field label="Expected CTC" id="expectedCtc" error={errors.expectedCtc}>
+                  <input id="expectedCtc" className="input" value={form.expectedCtc} onChange={update('expectedCtc')} placeholder="e.g. 12 LPA" />
                 </Field>
               </div>
 
@@ -235,16 +384,27 @@ export default function CareersClient({ jobs, preselectedJobId }) {
                 />
                 <span>
                   I agree to receive a recorded screening call from an AI voice agent on the number above, and to be
-                  contacted by email about this application.
+                  contacted by email about this application. Read the{' '}
+                  <a href="/privacy" target="_blank" rel="noopener">
+                    privacy notice
+                  </a>{' '}
+                  — what we record, how long we keep it, and how to ask for deletion.
                 </span>
               </label>
               {errors.consent && <span className="error-text">{errors.consent}</span>}
             </div>
             <div className="card-foot row-between">
-              <span className="muted small">We only use your details for this hiring process.</span>
-              <button className="btn btn-primary" type="submit" disabled={submitting}>
-                {submitting ? 'Submitting…' : 'Submit application'}
-              </button>
+              <span className="muted small">
+                We only use your details for this hiring process. <a href="/privacy" target="_blank" rel="noopener">Privacy notice</a>
+              </span>
+              <div className="row">
+                <button type="button" className="btn" onClick={saveForLater} disabled={saving || submitting} title="Get a link to finish this application later">
+                  {saving ? 'Saving…' : 'Save & finish later'}
+                </button>
+                <button className="btn btn-primary" type="submit" disabled={submitting}>
+                  {submitting ? 'Submitting…' : 'Submit application'}
+                </button>
+              </div>
             </div>
           </form>
         </section>
